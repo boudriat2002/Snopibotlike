@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
-import data_pb2  # ملف data_pb2.py الذي تم إنشاؤه بواسطة protoc
+import data_pb2  # ملف protobuf
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
@@ -16,34 +16,32 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-# قراءة الحسابات من ملف acc.txt (بصيغة dict {uid: password})
+# قراءة الحسابات من ملف
 def read_accounts(file_path):
-    with open(file_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    with open(file_path, "r") as file:
+        return json.load(file)  # list of dicts: [{"uid": "...", "password": "..."}]
 
-# تشفير البيانات AES CBC
+# تشفير البيانات
 def encrypt_data(data, key, iv):
     cipher = AES.new(key, AES.MODE_CBC, iv)
     padded_data = pad(data, AES.block_size)
     return cipher.encrypt(padded_data).hex()
 
-# جلب JWT لكل حساب
+# جلب JWT Token
 def get_jwt_token(uid, password):
     url = f"https://gpl-jwt.vercel.app/get?uid={uid}&password={password}"
     try:
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, timeout=3)
         if response.status_code == 200:
-            token = response.json().get("token")
-            if token:
-                logging.info(f"✅ تم جلب التوكن لـ {uid}")
-                return uid, token
+            logging.info(f"✅ تم جلب التوكن لـ {uid}")
+            return uid, response.json().get("token")
         logging.warning(f"⚠️ فشل لجلب التوكن لـ {uid}")
         return uid, None
     except Exception as e:
         logging.error(f"❌ خطأ في جلب التوكن لـ {uid}: {e}")
         return uid, None
 
-# إرسال طلب للسيرفر
+# إرسال الطلب للسيرفر
 def send_request(url, encrypted_data, jwt_token):
     headers = {
         "Expect": "100-continue",
@@ -58,17 +56,17 @@ def send_request(url, encrypted_data, jwt_token):
         "Accept-Encoding": "gzip"
     }
     try:
-        resp = requests.post(url, headers=headers, data=bytes.fromhex(encrypted_data))
-        return resp
+        response = requests.post(url, headers=headers, data=bytes.fromhex(encrypted_data))
+        return response
     except Exception as e:
         logging.error(f"❌ خطأ في إرسال الطلب: {e}")
         return None
 
-# المسار الرئيسي
+# المسار الرئيسي في Flask
 @app.route("/like", methods=["GET"])
 def like_profile():
     try:
-        # أخذ المدخلات من الرابط
+        # أخذ المدخلات من الطلب
         request_id = request.args.get("id")
         request_code = request.args.get("code")
 
@@ -92,10 +90,10 @@ def like_profile():
         encrypted_data = encrypt_data(data_bytes, key, iv)
         logging.info("🔐 تم التشفير بنجاح.")
 
-        # جلب التوكنات (مباشرة من acc.txt بدون تخزين)
+        # جلب التوكنات باستخدام الـ ThreadPool
         jwt_tokens = {}
-        with ThreadPoolExecutor(max_workers=50) as executor:
-            futures = [executor.submit(get_jwt_token, uid, pwd) for uid, pwd in accounts.items()]
+        with ThreadPoolExecutor(max_workers=100) as executor:
+            futures = [executor.submit(get_jwt_token, acc["uid"], acc["password"]) for acc in accounts]
             for future in as_completed(futures):
                 uid, token = future.result()
                 if token:
@@ -104,22 +102,26 @@ def like_profile():
         # إرسال الطلبات
         url = "https://clientbp.ggblueshark.com/LikeProfile"
         results = []
-        with ThreadPoolExecutor(max_workers=50) as executor:
+        with ThreadPoolExecutor(max_workers=100) as executor:
             future_to_uid = {
                 executor.submit(send_request, url, encrypted_data, token): uid
                 for uid, token in jwt_tokens.items()
             }
+
             for future in as_completed(future_to_uid):
                 uid = future_to_uid[future]
-                resp = future.result()
-                if resp:
+                response = future.result()
+                if response:
                     results.append({
                         "uid": uid,
-                        "status_code": resp.status_code,
-                        "response_text": resp.text
+                        "status_code": response.status_code,
+                        "response_text": response.text
                     })
                 else:
-                    results.append({"uid": uid, "status": "failed"})
+                    results.append({
+                        "uid": uid,
+                        "status": "failed"
+                    })
 
         return jsonify({
             "request_id": request_id,
@@ -129,7 +131,7 @@ def like_profile():
         })
 
     except Exception as e:
-        logging.error(f"❌ خطأ في /like: {e}")
+        logging.error(f"❌ خطأ في المسار /like: {e}")
         return jsonify({"error": str(e)}), 500
 
 # تشغيل السيرفر
