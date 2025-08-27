@@ -2,10 +2,12 @@ from flask import Flask, request, jsonify
 import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
-import data_pb2  # ملف data_pb2.py الذي تم إنشاؤه بواسطة protoc
+import data_pb2  # ملف data_pb2.py
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+import time
+import os
 
 app = Flask(__name__)
 
@@ -16,10 +18,31 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
+ACCOUNTS_FILE = "acc.txt"
+JWT_FILE = "jwt.txt"
+TOKEN_EXPIRY = 8 * 3600  # 8 ساعات بالثواني
+
 # قراءة الحسابات من ملف
 def read_accounts(file_path):
     with open(file_path, "r") as file:
         return json.load(file)  # يتوقع List of dicts
+
+# تحميل التوكنات من ملف jwt.txt
+def load_jwt_tokens():
+    if os.path.exists(JWT_FILE):
+        try:
+            with open(JWT_FILE, "r") as f:
+                data = json.load(f)
+                return data.get("tokens", {}), data.get("timestamp", 0)
+        except:
+            return {}, 0
+    return {}, 0
+
+# حفظ التوكنات مع التوقيت
+def save_jwt_tokens(tokens):
+    data = {"tokens": tokens, "timestamp": int(time.time())}
+    with open(JWT_FILE, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
 # تشفير البيانات
 def encrypt_data(data, key, iv):
@@ -40,6 +63,29 @@ def get_jwt_token(uid, password):
     except Exception as e:
         logging.error(f"❌ خطأ في جلب التوكن لـ {uid}: {e}")
         return uid, None
+
+# تحديث التوكنات إذا انتهت صلاحيتها
+def get_or_refresh_tokens():
+    accounts = read_accounts(ACCOUNTS_FILE)
+
+    tokens, timestamp = load_jwt_tokens()
+    now = int(time.time())
+
+    if tokens and now - timestamp < TOKEN_EXPIRY:
+        logging.info("♻️ استخدام التوكنات المخزنة من jwt.txt")
+        return tokens
+
+    logging.info("🔄 إعادة تحديث التوكنات...")
+    new_tokens = {}
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        futures = [executor.submit(get_jwt_token, acc["uid"], acc["password"]) for acc in accounts]
+        for future in as_completed(futures):
+            uid, token = future.result()
+            if token:
+                new_tokens[uid] = token
+
+    save_jwt_tokens(new_tokens)
+    return new_tokens
 
 # إرسال الطلب للسيرفر
 def send_request(url, encrypted_data, jwt_token):
@@ -66,7 +112,6 @@ def send_request(url, encrypted_data, jwt_token):
 @app.route("/like", methods=["GET"])
 def like_profile():
     try:
-        # أخذ المدخلات من الطلب
         request_id = request.args.get("id")
         request_code = request.args.get("code")
 
@@ -74,9 +119,6 @@ def like_profile():
             return jsonify({"error": "يجب إرسال id و code"}), 400
 
         request_id = int(request_id)
-
-        # قراءة الحسابات
-        accounts = read_accounts("acc.txt")
 
         # إعدادات التشفير
         key = bytes([89, 103, 38, 116, 99, 37, 68, 69, 117, 104, 54, 37, 90, 99, 94, 56])
@@ -90,14 +132,8 @@ def like_profile():
         encrypted_data = encrypt_data(data_bytes, key, iv)
         logging.info("🔐 تم التشفير بنجاح.")
 
-        # جلب التوكنات باستخدام الـ ThreadPool
-        jwt_tokens = {}
-        with ThreadPoolExecutor(max_workers=100) as executor:
-            futures = [executor.submit(get_jwt_token, acc["uid"], acc["password"]) for acc in accounts]
-            for future in as_completed(futures):
-                uid, token = future.result()
-                if token:
-                    jwt_tokens[uid] = token
+        # جلب أو تحديث التوكنات
+        jwt_tokens = get_or_refresh_tokens()
 
         # إرسال الطلبات
         url = "https://clientbp.ggblueshark.com/LikeProfile"
