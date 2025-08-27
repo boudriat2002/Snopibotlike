@@ -22,49 +22,64 @@ ACCOUNTS_FILE = "acc.txt"
 JWT_FILE = "jwt.txt"
 TOKEN_EXPIRY = 8 * 3600  # 8 ساعات بالثواني
 
-# قراءة الحسابات من ملف
+# ------------------------------
+#  قراءة الحسابات
+# ------------------------------
 def read_accounts(file_path):
     with open(file_path, "r") as file:
-        return json.load(file)  # يتوقع List of dicts
+        return json.load(file)  # يتوقع List of dicts [{"uid":"..","password":".."}, ...]
 
-# تحميل التوكنات من ملف jwt.txt
+# ------------------------------
+#  إدارة ملف jwt.txt
+# ------------------------------
 def load_jwt_tokens():
+    """تحميل التوكنات من jwt.txt"""
     if os.path.exists(JWT_FILE):
         try:
-            with open(JWT_FILE, "r") as f:
+            with open(JWT_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 return data.get("tokens", {}), data.get("timestamp", 0)
-        except:
+        except Exception as e:
+            logging.error(f"⚠️ خطأ عند قراءة jwt.txt: {e}")
             return {}, 0
     return {}, 0
 
-# حفظ التوكنات مع التوقيت
 def save_jwt_tokens(tokens):
+    """حفظ التوكنات الجديدة في jwt.txt"""
     data = {"tokens": tokens, "timestamp": int(time.time())}
-    with open(JWT_FILE, "w") as f:
+    with open(JWT_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+    logging.info("💾 تم حفظ التوكنات في jwt.txt")
 
-# تشفير البيانات
+# ------------------------------
+#  التشفير
+# ------------------------------
 def encrypt_data(data, key, iv):
     cipher = AES.new(key, AES.MODE_CBC, iv)
     padded_data = pad(data, AES.block_size)
     return cipher.encrypt(padded_data).hex()
 
-# جلب JWT Token
+# ------------------------------
+#  جلب التوكن
+# ------------------------------
 def get_jwt_token(uid, password):
     url = f"https://gpl-jwt.vercel.app/get?uid={uid}&password={password}"
     try:
-        response = requests.get(url, timeout=3)
+        response = requests.get(url, timeout=5)
         if response.status_code == 200:
-            logging.info(f"✅ تم جلب التوكن لـ {uid}")
-            return uid, response.json().get("token")
-        logging.warning(f"⚠️ فشل لجلب التوكن لـ {uid}")
+            token = response.json().get("token")
+            if token:
+                logging.info(f"✅ تم جلب التوكن لـ {uid}")
+                return uid, token
+        logging.warning(f"⚠️ فشل جلب التوكن لـ {uid}")
         return uid, None
     except Exception as e:
         logging.error(f"❌ خطأ في جلب التوكن لـ {uid}: {e}")
         return uid, None
 
-# تحديث التوكنات إذا انتهت صلاحيتها
+# ------------------------------
+#  تحديث أو استرجاع التوكنات
+# ------------------------------
 def get_or_refresh_tokens():
     accounts = read_accounts(ACCOUNTS_FILE)
 
@@ -72,7 +87,7 @@ def get_or_refresh_tokens():
     now = int(time.time())
 
     if tokens and now - timestamp < TOKEN_EXPIRY:
-        logging.info("♻️ استخدام التوكنات المخزنة من jwt.txt")
+        logging.info("♻️ استخدام التوكنات المخزنة من jwt.txt (مازالت صالحة)")
         return tokens
 
     logging.info("🔄 إعادة تحديث التوكنات...")
@@ -87,7 +102,9 @@ def get_or_refresh_tokens():
     save_jwt_tokens(new_tokens)
     return new_tokens
 
-# إرسال الطلب للسيرفر
+# ------------------------------
+#  إرسال الطلب
+# ------------------------------
 def send_request(url, encrypted_data, jwt_token):
     headers = {
         "Expect": "100-continue",
@@ -108,7 +125,9 @@ def send_request(url, encrypted_data, jwt_token):
         logging.error(f"❌ خطأ في إرسال الطلب: {e}")
         return None
 
-# المسار الرئيسي في Flask
+# ------------------------------
+#  المسار الرئيسي
+# ------------------------------
 @app.route("/like", methods=["GET"])
 def like_profile():
     try:
@@ -170,6 +189,8 @@ def like_profile():
         logging.error(f"❌ خطأ في المسار /like: {e}")
         return jsonify({"error": str(e)}), 500
 
-# تشغيل السيرفر
+# ------------------------------
+#  تشغيل السيرفر
+# ------------------------------
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
